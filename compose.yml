@@ -1,0 +1,128 @@
+name: automacao-financeira
+
+services:
+  # ----------------------------------------------------------------
+  # BANCO DE DADOS (Compartilhado)
+  # ----------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: shared_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: evolution # Banco padrão (o script cria o do n8n)
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-multiple-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-dbs.sh
+    networks:
+      - internal_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d evolution"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------
+  # REDIS (Dependência Evolution)
+  # ----------------------------------------------------------------
+  redis:
+    image: redis:alpine
+    container_name: shared_redis
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------
+  # EVOLUTION API V2
+  # ----------------------------------------------------------------
+  evolution_api:
+    image: atendai/evolution-api:v2.1.1
+    container_name: evolution_api
+    restart: always
+    ports:
+      - "8081:8080" # Porta Exposta: 8081
+    environment:
+      - SERVER_URL=http://localhost:8081
+      - DOCKER_ENV=true
+      - DEL_INSTANCE=false
+      
+      # Banco de Dados
+      - DATABASE_ENABLED=true
+      - DATABASE_CONNECTION_URI=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/evolution
+      - DATABASE_CLIENT_NAME=evolution_exchange
+      
+      # Redis
+      - REDIS_ENABLED=true
+      - REDIS_URI=redis://redis:6379/0
+      - REDIS_PREFIX_KEY=evolution
+      - CACHE_REDIS_ENABLED=true
+      
+      # Auth
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}
+      
+      # Outros
+      - RABBITMQ_ENABLED=false
+      - S3_ENABLED=false
+    networks:
+      - internal_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ----------------------------------------------------------------
+  # n8n
+  # ----------------------------------------------------------------
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: always
+    ports:
+      - "5678:5678"
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      
+      # Segurança e Timezone
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_USER}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASS}
+      - GENERIC_TIMEZONE=America/Sao_Paulo
+      - TZ=America/Sao_Paulo
+      
+      # Webhook URL (Importante para produção/tunnel)
+      # Se for rodar local sem tunnel, pode comentar, mas o ideal é configurar
+      # - WEBHOOK_URL=https://seu-dominio-tunnel.com/
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks:
+      - internal_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+# ----------------------------------------------------------------
+# VOLUMES E REDES
+# ----------------------------------------------------------------
+volumes:
+  postgres_data:
+  redis_data:
+  n8n_data:
+
+networks:
+  internal_net:
+    driver: bridge
